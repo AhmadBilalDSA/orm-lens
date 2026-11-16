@@ -191,6 +191,11 @@ def _build_body_regexes(indent: int):
         "ALIASED_FIELD_RE": re.compile(
             rf"^{w}([a-zA-Z_][a-zA-Z0-9_]*){ann}\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\("
         ),
+        # ``a = None`` or chained ``a = b = None``; group 1 holds the targets.
+        "REMOVED_RE": re.compile(
+            rf"^{w}([a-zA-Z_][a-zA-Z0-9_]*(?:\s*=\s*[a-zA-Z_][a-zA-Z0-9_]*)*){ann}"
+            r"\s*=\s*None\s*(?:#.*)?$"
+        ),
         "META_START_RE": re.compile(rf"^{w}class\s+Meta\s*(?:\([^)]*\))?\s*:"),
         "META_ITEM_RE": re.compile(
             rf"^{w2}([a-zA-Z_][a-zA-Z0-9_]*){ann}\s*=\s*(.+?)\s*(#.*)?$"
@@ -759,6 +764,13 @@ def _collect_defs(
                 j = k
                 continue
 
+            removed = rx["REMOVED_RE"].match(inner)
+            if removed:
+                # ``name = None`` drops a field inherited from an abstract base.
+                model.removed_fields.extend(re.split(r"\s*=\s*", removed[1]))
+                j += 1
+                continue
+
             alias_match = rx["ALIASED_FIELD_RE"].match(inner) if field_aliases else None
             aliased_type = field_aliases.get(alias_match[2]) if alias_match else None
             fm = (
@@ -975,6 +987,57 @@ def _has_model_ancestry(
     return False
 
 
+def _django_field(name: str, type_: str, args: str, origin: str) -> ParsedField:
+    return ParsedField(
+        name=name, type=type_, args=args, is_relation=False, line_number=0,
+        inherited_from=origin,
+    )
+
+
+def _auth_m2m(name: str, target: str) -> ParsedField:
+    return ParsedField(
+        name=name,
+        type="ManyToManyField",
+        args=f'"{target}", blank=True, related_name="user_set", related_query_name="user"',
+        is_relation=True,
+        line_number=0,
+        related_model=target,
+        relation_kind="ManyToManyField",
+        related_name="user_set",
+        inherited_from="PermissionsMixin",
+    )
+
+
+_ABSTRACT_BASE_USER = (
+    _django_field("password", "CharField", "max_length=128", "AbstractBaseUser"),
+    _django_field("last_login", "DateTimeField", "blank=True, null=True", "AbstractBaseUser"),
+)
+_PERMISSIONS_MIXIN = (
+    _django_field("is_superuser", "BooleanField", "default=False", "PermissionsMixin"),
+    _auth_m2m("groups", "auth.Group"),
+    _auth_m2m("user_permissions", "auth.Permission"),
+)
+
+# Fields of django.contrib.auth's abstract bases, which live in site-packages
+# where a workspace scan never looks. ``is_active`` on AbstractBaseUser is a
+# plain class attribute, not a field. A workspace class of the same name wins.
+DJANGO_ABSTRACT_BASES: dict[str, tuple[ParsedField, ...]] = {
+    "AbstractBaseUser": _ABSTRACT_BASE_USER,
+    "PermissionsMixin": _PERMISSIONS_MIXIN,
+    "AbstractUser": (
+        *_ABSTRACT_BASE_USER,
+        *_PERMISSIONS_MIXIN,
+        _django_field("username", "CharField", "max_length=150, unique=True", "AbstractUser"),
+        _django_field("first_name", "CharField", "max_length=150, blank=True", "AbstractUser"),
+        _django_field("last_name", "CharField", "max_length=150, blank=True", "AbstractUser"),
+        _django_field("email", "EmailField", "blank=True", "AbstractUser"),
+        _django_field("is_staff", "BooleanField", "default=False", "AbstractUser"),
+        _django_field("is_active", "BooleanField", "default=True", "AbstractUser"),
+        _django_field("date_joined", "DateTimeField", "default=timezone.now", "AbstractUser"),
+    ),
+}
+
+
 def _abstract_bases_fields(
     model: ParsedModel,
     by_name: dict[str, list[ParsedModel]],
@@ -991,8 +1054,9 @@ def _abstract_bases_fields(
 
     Bases are walked in declaration order and the first declaration of a name
     wins, which is the direction Python's MRO resolves for the single-
-    inheritance chains this actually matters for. ``stack`` breaks cycles in
-    malformed source instead of recursing forever.
+    inheritance chains this actually matters for. A parent's own field, or its
+    ``name = None``, hides that name from the parent's ancestors. ``stack``
+    breaks cycles in malformed source instead of recursing forever.
     """
     out: list[ParsedField] = []
     taken: set[str] = set()
@@ -1021,40 +1085,48 @@ def _abstract_bases_fields(
             parent.name == model.name and parent.file_path == model.file_path
         ):
             parent = _pick_base(by_name.get(target, []), model)
-        if parent is None or parent is model or not _is_abstract(parent):
+        if parent is None:
+            contributed = [replace(f) for f in DJANGO_ABSTRACT_BASES.get(target, ())]
+        elif parent is model or not _is_abstract(parent):
             continue
-        parent_key = (
-            str(resolver._resolved(Path(parent.file_path)))
-            if resolver is not None
-            else parent.file_path,
-            parent.name,
-        )
-        if parent_key in current_stack:
-            continue
-        # ``Meta.abstract`` is not enough: Django copies fields only from an
-        # abstract *model*, so a plain class marked abstract must not
-        # contribute its attributes as columns (#249 follow-up).
-        if not _has_model_ancestry(
-            parent,
-            by_name,
-            resolver,
-            frozenset({model_key}),
-            known_non_models,
-        ):
-            continue
-        contributed = [
-            *_abstract_bases_fields(
+        else:
+            parent_key = (
+                str(resolver._resolved(Path(parent.file_path)))
+                if resolver is not None
+                else parent.file_path,
+                parent.name,
+            )
+            if parent_key in current_stack:
+                continue
+            # ``Meta.abstract`` is not enough: Django copies fields only from an
+            # abstract *model*, so a plain class marked abstract must not
+            # contribute its attributes as columns (#249 follow-up).
+            if not _has_model_ancestry(
                 parent,
                 by_name,
-                (*current_stack, parent_key),
                 resolver,
+                frozenset({model_key}),
                 known_non_models,
-            ),
-            *(
-                replace(f, inherited_from=f.inherited_from or parent.name)
-                for f in parent.fields
-            ),
-        ]
+            ):
+                continue
+            hidden = {f.name for f in parent.fields} | set(parent.removed_fields)
+            contributed = [
+                *(
+                    f
+                    for f in _abstract_bases_fields(
+                        parent,
+                        by_name,
+                        (*current_stack, parent_key),
+                        resolver,
+                        known_non_models,
+                    )
+                    if f.name not in hidden
+                ),
+                *(
+                    replace(f, inherited_from=f.inherited_from or parent.name)
+                    for f in parent.fields
+                ),
+            ]
         for f in contributed:
             if f.name in taken:
                 continue
@@ -1081,7 +1153,7 @@ def _attach_inherited_fields(
         # subclass. The resolver supplies the import graph for aliases.
         by_name.setdefault(m.name, []).append(m)
     for m in all_defs:
-        own = {f.name for f in m.fields}
+        own = {f.name for f in m.fields} | set(m.removed_fields)
         m.inherited_fields = [
             f
             for f in _abstract_bases_fields(
