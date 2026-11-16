@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from fnmatch import fnmatch
 from pathlib import Path
 
-from ._paths import BROAD_SKIP_DIRS, _app_dir_for
+from ._paths import BROAD_SKIP_DIRS, _app_dir_for, _package_dir
 from .models import (
     ParsedApp,
     ParsedField,
@@ -653,11 +653,7 @@ def _collect_defs(
     all_defs: list[ParsedModel] = []
     in_string = _lines_inside_strings(lines)
     field_aliases = _field_import_aliases(lines, in_string)
-    parent = os.path.basename(os.path.dirname(file_path))
-    if parent == "models":
-        app_name = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
-    else:
-        app_name = parent or "app"
+    app_name = _app_dir_for(file_path)[1] or "app"
 
     i = 0
     while i < len(lines):
@@ -868,15 +864,23 @@ def _pick_base(
     """Choose which same-named class ``model``'s base refers to.
 
     A base in the subclass's own directory wins (``order/models.py`` →
-    ``order/abstract_models.py``). Failing that, a base in the same app
-    (``order/models/line.py`` → ``order/abstract_models.py``) wins. Otherwise
-    the first definition, as before.
+    ``order/abstract_models.py``). Failing that, a base in the same package
+    (``order/models/line.py`` → ``order/abstract_models.py``), then one in the
+    same app (``app/b/models.py`` → ``app/abstract_models.py`` when ``app`` is
+    the enclosing app). Otherwise the first definition, as before.
+
+    The package comes before the app: two sub-packages of one app
+    (``app/a/``, ``app/b/``) can each define a ``Base``.
     """
     if not candidates:
         return None
     here = Path(model.file_path).parent
     for c in candidates:
         if Path(c.file_path).parent == here:
+            return c
+    package_dir = _package_dir(model.file_path)
+    for c in candidates:
+        if _package_dir(c.file_path) == package_dir:
             return c
     app_dir = _app_dir_for(model.file_path)[0]
     for c in candidates:
