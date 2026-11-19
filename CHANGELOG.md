@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer produce model-relation warnings. Queries made through a related
   manager inside a model-instance loop can still be reported.
 
+- **Drift detection replays local subclasses of structural migration operations**
+  ([#304](https://github.com/FROWNINGdev/orm-lens/issues/304)). An `AddField`
+  subclass that changes only the database operation now counts as adding the
+  field to Django's migration state.
+
 - **VS Code rules DOL001-DOL004 skip a match that is an operand of an operator**
   ([#293](https://github.com/FROWNINGdev/orm-lens/issues/293)).
   In `if event.capacity - event.registrations.count() > 0:` Python tests the
