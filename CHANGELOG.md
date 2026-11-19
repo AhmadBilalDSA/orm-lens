@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `verbose_name=_('Document')` no longer causes the parser to misread
   `on_delete` as the target instead of `to=Document`.
 
+- **Migration risk separates apps with the same directory name**
+  ([#308](https://github.com/FROWNINGdev/orm-lens/issues/308)). Group migrations
+  by their configured Django app label when it can be read from `apps.py`.
+
 - **VS Code rules DOL001-DOL004 skip a match that is an operand of an operator**
   ([#293](https://github.com/FROWNINGdev/orm-lens/issues/293)).
   In `if event.capacity - event.registrations.count() > 0:` Python tests the
