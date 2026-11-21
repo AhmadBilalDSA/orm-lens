@@ -797,9 +797,12 @@ def _configured_app_label(package: Path) -> str | None:
 
 
 def _build_current_schema(
-    project_root: str, *, app_labels_by_package: dict[Path, str] | None = None
+    project_root: str,
+    *,
+    app_labels_by_package: dict[Path, str] | None = None,
+    parent_links: dict[str, dict[str, set[str]]] | None = None,
 ) -> dict[str, dict[str, set]]:
-    """Return ``{app_name: {model_name_lower: {field_names}}}`` from parser.
+    """Return declared fields and optionally collect inferred parent links separately.
 
     Failures are swallowed — cross-reference rule is best-effort.
     """
@@ -829,7 +832,10 @@ def _build_current_schema(
             # concrete child's table, so a migration that creates them is not
             # drift. Reported as #58 against django-guardian, where four such
             # fields read as "migrated but no longer declared".
-            app_map[model.name.lower()] = {f.name for f in model.all_fields()}
+            name = model.name.lower()
+            app_map[name] = {f.name for f in model.all_fields()}
+            if parent_links is not None:
+                parent_links.setdefault(app_label, {})[name] = model.implicit_parent_links
     return schema
 
 
